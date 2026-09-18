@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The glyph in the status bar while a copy or a move is running.
+
+    A flat white silhouette on nothing, because that is the only thing Android
+    draws for a small notification icon — every colour in here is thrown away
+    and anything with a background comes out as a solid blob. Two arrows passing
+    is the one shape that reads at 24dp as "something is going from here to
+    there", which is the whole message.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16,17.01V10h-2v7.01h-3L15,21l4,-3.99h-3zM9,3L5,6.99h3V14h2V6.99h3L9,3z" />
+</vector>
