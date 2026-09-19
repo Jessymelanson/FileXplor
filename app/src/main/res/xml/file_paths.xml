@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    What the FileProvider will hand out.
+
+    Deliberately broad, because a file manager is asked to open whatever the
+    user is looking at and there is no narrower path that still covers "the file
+    they tapped". `cache-path` is here for the copies pulled down from a server,
+    which live in the cache until something opens them and are not on external
+    storage at all.
+
+    `root-path` is the one that matters, and it was missing.
+
+    `external-path` resolves to getExternalStorageDirectory(), which is the
+    *primary* volume and nothing else. An SD card is mounted somewhere like
+    /storage/1A2B-3C4D, a USB stick somewhere else again — neither is under that
+    root, so getUriForFile threw IllegalArgumentException for every file on one.
+    The app offers SD cards as shortcuts on its own home screen, so the failure
+    was reachable in two taps: open a file on the card, and be told nothing on
+    this phone could open it. The same applied to sharing.
+
+    Broad here is not the same as exposed. The provider is not exported, so
+    nothing can ask it for a URI; the app mints one for a single file at the
+    moment the user asks for that file to be opened, and hands it over with a
+    read grant that lasts as long as the receiving activity. That is the same
+    posture every file manager on the platform takes, and it is the only one
+    that can answer "open this" for an arbitrary path.
+
+    The narrower entries are kept below it. They cost nothing, and they document
+    the two places that are always in play.
+-->
+<paths>
+    <root-path name="root" path="/" />
+    <external-path name="external" path="." />
+    <cache-path name="downloads" path="remote/" />
+</paths>
