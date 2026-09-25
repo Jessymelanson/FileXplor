@@ -92,7 +92,13 @@ object JobNotifications {
         // permission was revoked between the check and this line, and a
         // revoked permission is not a reason to lose the operation it was
         // describing.
-        runCatching { manager.notify(RUNNING_ID, build(context, title, current, percent)) }
+        try {
+            manager.notify(RUNNING_ID, build(context, title, current, percent))
+        } catch (e: SecurityException) {
+            // Revoked since the check above.
+        } catch (e: RuntimeException) {
+            // A notification is never worth failing the job it describes.
+        }
     }
 
     /**
@@ -123,7 +129,13 @@ object JobNotifications {
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
             .build()
-        runCatching { manager.notify(OUTCOME_ID, notification) }
+        try {
+            manager.notify(OUTCOME_ID, notification)
+        } catch (e: SecurityException) {
+            // Revoked since the check above.
+        } catch (e: RuntimeException) {
+            // Nothing to be done about a record that could not be posted.
+        }
     }
 
     /** Removes both, for a fresh start with nothing running. */

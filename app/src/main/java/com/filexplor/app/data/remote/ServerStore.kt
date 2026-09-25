@@ -66,12 +66,28 @@ class ServerStore(context: Context) {
      */
     fun save(server: RemoteServer): RemoteServer {
         val withId = if (server.id.isBlank()) server.copy(id = UUID.randomUUID().toString()) else server
+        val entries = rawEntries()
         val array = JSONArray()
-        rawEntries().forEach { entry ->
+        entries.forEach { entry ->
             if (entry.optString("id") != withId.id) array.put(entry)
         }
         array.put(toJson(withId))
-        prefs.edit().putString(KEY_SERVERS, array.toString()).apply()
+
+        // A server edited to point somewhere else is a different machine, so
+        // the SSH key learned from the old one is forgotten. Kept, it made the
+        // first connection to the new address fail with the warning meant for
+        // an intercepted connection, and the only way out was deleting the
+        // server and adding it again.
+        val previous = entries.firstOrNull { it.optString("id") == withId.id }
+        val moved = previous != null && (
+            previous.optString("host") != withId.host ||
+                previous.optInt("port") != withId.port ||
+                previous.optString("protocol") != withId.protocol.name
+            )
+
+        val edit = prefs.edit().putString(KEY_SERVERS, array.toString())
+        if (moved) edit.remove(hostKeyKey(withId.id))
+        edit.apply()
         return withId
     }
 

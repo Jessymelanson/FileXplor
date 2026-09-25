@@ -44,9 +44,10 @@ object FolderCounts {
      * which is exactly when the count it holds stops being true. Keying on the
      * path alone would show a stale number until the app was killed.
      */
-    private fun keyOf(item: FileItem) = "${item.path}|${item.lastModified}"
+    private fun keyOf(item: FileItem, withHidden: Boolean) =
+        "${item.path}|${item.lastModified}|$withHidden"
 
-    fun cached(item: FileItem): Int? = cache.get(keyOf(item))
+    fun cached(item: FileItem, withHidden: Boolean): Int? = cache.get(keyOf(item, withHidden))
 
     /**
      * Counts one folder, or returns null where it cannot be read.
@@ -54,16 +55,21 @@ object FolderCounts {
      * Null and zero are kept apart deliberately. A folder the app has no
      * permission to open is not an empty folder, and badging it "0" would be
      * the app stating something it does not know.
+     *
+     * Hidden entries count only when hidden files are being shown. The badge
+     * says how many things opening the folder will show, and a folder holding
+     * one dotfile read "14" outside and "13 items" inside.
      */
-    fun count(item: FileItem): Int? {
-        val key = keyOf(item)
+    fun count(item: FileItem, withHidden: Boolean): Int? {
+        val key = keyOf(item, withHidden)
         cache.get(key)?.let { return it }
         // list() rather than listFiles(): the names alone are wanted, and
         // building a File object per child to then count them is work thrown
         // away — on a folder of several thousand it is the whole cost.
         val names = runCatching { File(item.path).list() }.getOrNull() ?: return null
-        cache.put(key, names.size)
-        return names.size
+        val shown = if (withHidden) names.size else names.count { !it.startsWith(".") }
+        cache.put(key, shown)
+        return shown
     }
 }
 
@@ -74,15 +80,15 @@ object FolderCounts {
  * list scrolled back over does not blink its numbers away and fetch them again.
  */
 @Composable
-fun rememberFolderCount(item: FileItem, location: Location): Int? {
+fun rememberFolderCount(item: FileItem, location: Location, withHidden: Boolean): Int? {
     if (!item.isDirectory || location != Location.Device) return null
 
-    var count by remember(item.path, item.lastModified) {
-        mutableStateOf(FolderCounts.cached(item))
+    var count by remember(item.path, item.lastModified, withHidden) {
+        mutableStateOf(FolderCounts.cached(item, withHidden))
     }
-    LaunchedEffect(item.path, item.lastModified) {
+    LaunchedEffect(item.path, item.lastModified, withHidden) {
         if (count == null) {
-            count = withContext(Dispatchers.IO) { FolderCounts.count(item) }
+            count = withContext(Dispatchers.IO) { FolderCounts.count(item, withHidden) }
         }
     }
     return count

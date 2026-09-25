@@ -42,6 +42,8 @@ import com.filexplor.app.data.remote.RemoteProtocol
 import com.filexplor.app.data.remote.RemoteServer
 import com.filexplor.app.ui.Dialog
 import com.filexplor.app.ui.formatBytes
+import com.filexplor.app.ui.formatBytesExact
+import com.filexplor.app.ui.describeContents
 import com.filexplor.app.ui.formatDate
 
 /**
@@ -146,7 +148,40 @@ fun FileXplorDialogHost(
                 Column {
                     DetailRow("Kind", dialog.item.kind.name.lowercase().replaceFirstChar { it.uppercase() })
                     if (!dialog.item.isDirectory) {
-                        DetailRow("Size", formatBytes(dialog.item.size))
+                        DetailRow("Size", formatBytesExact(dialog.item.size))
+                    } else {
+                        // Everything inside, all the way down, filled in as
+                        // it is counted; on a server that is a listing per
+                        // folder, so the running numbers show it is working.
+                        val summary = dialog.summary
+                        val counting = summary == null || !summary.complete
+                        DetailRow(
+                            "Contains",
+                            when {
+                                summary == null -> "Counting…"
+                                counting -> "${describeContents(summary)} so far…"
+                                else -> describeContents(summary)
+                            }
+                        )
+                        if (summary != null) {
+                            DetailRow(
+                                "Size",
+                                formatBytesExact(summary.bytes) + if (counting) " so far…" else ""
+                            )
+                        }
+                        if (summary != null && summary.complete && summary.unreadable > 0) {
+                            Text(
+                                if (summary.unreadable == 1) {
+                                    "One folder inside couldn't be read, so it isn't counted."
+                                } else {
+                                    "${summary.unreadable} folders inside couldn't be read, " +
+                                        "so they aren't counted."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
                     }
                     DetailRow("Modified", formatDate(dialog.item.lastModified))
                     Spacer(Modifier.height(8.dp))

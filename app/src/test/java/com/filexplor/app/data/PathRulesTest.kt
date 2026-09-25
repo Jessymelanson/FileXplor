@@ -121,4 +121,19 @@ class PathRulesTest {
         // produce " (2).bashrc".
         assertEquals(".bashrc (2)", uniqueName(".bashrc", setOf(".bashrc")))
     }
+
+    @Test
+    fun `a name taken in another case counts as taken`() {
+        // Shared storage and Windows servers treat these as one file, so
+        // keeping the name would write over the one already there.
+        assertEquals("notes (2).txt", uniqueName("notes.txt", setOf("Notes.txt")))
+    }
+
+    @Test
+    fun `numbering skips numbers taken in another case`() {
+        assertEquals(
+            "Song (3).MP3",
+            uniqueName("Song.MP3", setOf("song.mp3", "SONG (2).mp3"))
+        )
+    }
 }

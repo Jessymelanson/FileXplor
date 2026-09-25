@@ -349,7 +349,7 @@ class MainActivity : FragmentActivity() {
                                 onClearClipboard = model::clearClipboard,
                                 onDelete = model::requestDelete,
                                 onRename = model::requestRename,
-                                onDetails = { model.showDialog(com.filexplor.app.ui.Dialog.Details(it)) },
+                                onDetails = { model.showDetails(it) },
                                 onShare = ::shareItem,
                                 onNewFolder = model::requestNewFolder,
                                 onNewFile = model::requestNewFile,

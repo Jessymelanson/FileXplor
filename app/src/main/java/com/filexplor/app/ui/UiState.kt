@@ -233,8 +233,16 @@ sealed interface Dialog {
 
     data class ConfirmDelete(val items: List<FileItem>) : Dialog
 
-    /** The details panel for one entry. */
-    data class Details(val item: FileItem) : Dialog
+    /**
+     * The details panel for one entry.
+     *
+     * [summary] is a folder's contents, filled in while it is counted; null
+     * for a file, and for a folder until the first listing comes back.
+     */
+    data class Details(
+        val item: FileItem,
+        val summary: com.filexplor.app.data.FolderSummary? = null
+    ) : Dialog
 
     data object Appearance : Dialog
 

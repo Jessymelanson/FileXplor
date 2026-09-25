@@ -77,6 +77,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.Image
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
@@ -187,13 +189,19 @@ fun BrowseScreen(
                 },
                 title = {
                     if (searching) {
+                        // Focused as it appears, so the tap that opened it is
+                        // the only one needed. It used to open unfocused: the
+                        // keyboard stayed down and typing went nowhere until the
+                        // field was tapped a second time.
+                        val filterFocus = remember { FocusRequester() }
                         OutlinedTextField(
                             value = state.query,
                             onValueChange = onQueryChange,
                             placeholder = { Text("Filter this folder") },
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth().focusRequester(filterFocus)
                         )
+                        LaunchedEffect(Unit) { filterFocus.requestFocus() }
                     } else {
                         Column {
                             Text(
@@ -368,7 +376,12 @@ fun BrowseScreen(
                         onDelete = onDelete,
                         onClear = onClearSelection
                     )
-                } else if (state.clipboard != null) {
+                } else if (state.clipboard != null && state.job == null) {
+                    // Not while a job runs. The clipboard is only emptied once
+                    // a paste has landed, so the bar used to stay up through
+                    // the whole copy, still offering "Paste here" for the paste
+                    // already under way. It comes back only if that paste
+                    // landed nothing or was stopped, which is when it is wanted.
                     ClipboardBar(
                         count = state.clipboard.count,
                         move = state.clipboard.move,
@@ -432,6 +445,7 @@ fun BrowseScreen(
                         GridCell(
                             item = item,
                             location = state.location,
+                            showHidden = state.showHidden,
                             downloaded = item.path in state.downloaded,
                             selected = item.path in state.selected,
                             onClick = { if (state.selecting) onToggle(item) else openOrEnter(item, onNavigate, onOpen) },
@@ -452,6 +466,7 @@ fun BrowseScreen(
                         FileRow(
                             item = item,
                             location = state.location,
+                            showHidden = state.showHidden,
                             downloaded = item.path in state.downloaded,
                             detailed = state.viewMode == ViewMode.DETAILS,
                             selected = item.path in state.selected,
@@ -568,6 +583,7 @@ private fun CrumbBar(crumbs: List<Crumb>, onHome: () -> Unit, onNavigate: (Strin
 private fun FileGlyph(
     item: FileItem,
     location: com.filexplor.app.data.Location,
+    showHidden: Boolean,
     downloaded: Boolean,
     size: androidx.compose.ui.unit.Dp
 ) {
@@ -575,7 +591,7 @@ private fun FileGlyph(
     val density = LocalDensity.current
     val pixels = with(density) { size.roundToPx() }
     val thumbnail = rememberThumbnail(item, location, pixels)
-    val folderCount = rememberFolderCount(item, location)
+    val folderCount = rememberFolderCount(item, location, showHidden)
 
     // A folder is badged with how much is in it; a file with what it is. The
     // same chip either way, because they answer the same question — "what am I
@@ -668,6 +684,7 @@ private fun FileGlyph(
 private fun FileRow(
     item: FileItem,
     location: com.filexplor.app.data.Location,
+    showHidden: Boolean,
     downloaded: Boolean,
     detailed: Boolean,
     selected: Boolean,
@@ -697,6 +714,7 @@ private fun FileRow(
         FileGlyph(
             item = item,
             location = location,
+            showHidden = showHidden,
             downloaded = downloaded,
             size = if (detailed) 36.dp else 26.dp
         )
@@ -769,6 +787,7 @@ private fun FileRow(
 private fun GridCell(
     item: FileItem,
     location: com.filexplor.app.data.Location,
+    showHidden: Boolean,
     downloaded: Boolean,
     selected: Boolean,
     onClick: () -> Unit,
@@ -799,7 +818,7 @@ private fun GridCell(
         // Two thirds of the tile. At half it read as a small picture sitting in
         // a large empty box; much past this and a plain icon — which has no
         // detail to reward the size — starts to look shouted.
-        FileGlyph(item = item, location = location, downloaded = downloaded, size = 76.dp)
+        FileGlyph(item = item, location = location, showHidden = showHidden, downloaded = downloaded, size = 76.dp)
         Spacer(Modifier.height(7.dp))
         Text(
             item.name,

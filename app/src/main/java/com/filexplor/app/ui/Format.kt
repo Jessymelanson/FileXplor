@@ -43,3 +43,48 @@ fun formatDate(epochMillis: Long): String =
         java.text.SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault())
             .format(java.util.Date(epochMillis))
     }
+
+/**
+ * "57% · 1.2 GB of 2.1 GB", with "· 3 of 12 items" when there is more than one.
+ *
+ * The bar alone was all a running job showed, and on a six-minute copy of one
+ * large file a bar is hard to read: nothing says whether it is a fifth done or
+ * four fifths, or whether it has moved in the last minute. Null while the job
+ * is still working out its own size.
+ */
+fun progressLine(progress: com.filexplor.app.data.Progress): String? {
+    if (progress.preparing) return null
+    val parts = mutableListOf("${(progress.fraction * 100).toInt()}%")
+    if (progress.bytesTotal > 0L) {
+        parts += "${formatBytes(progress.bytesDone)} of ${formatBytes(progress.bytesTotal)}"
+    }
+    if (progress.filesTotal > 1) {
+        parts += "${progress.filesDone} of ${progress.filesTotal} items"
+    }
+    return parts.joinToString(" · ")
+}
+
+/**
+ * "2.1 GB (2,300,000,000 bytes)" -- the rounded size and the exact one.
+ *
+ * The exact count is what tells two copies of a large file apart when the
+ * rounded one reads the same for both, which is the check somebody makes
+ * after a transfer they are not sure of.
+ */
+fun formatBytesExact(bytes: Long): String {
+    if (bytes < 0) return "—"
+    if (bytes < 1024) return if (bytes == 1L) "1 byte" else "$bytes bytes"
+    return "${formatBytes(bytes)} (${String.format(Locale.getDefault(), "%,d", bytes)} bytes)"
+}
+
+/** "1,234 files in 56 folders", "3 files", "2 folders", or "Empty". */
+fun describeContents(summary: com.filexplor.app.data.FolderSummary): String {
+    fun count(n: Int, noun: String) =
+        String.format(Locale.getDefault(), "%,d", n) + " " + if (n == 1) noun else "${noun}s"
+    return when {
+        summary.files == 0 && summary.folders == 0 -> "Empty"
+        summary.folders == 0 -> count(summary.files, "file")
+        summary.files == 0 -> count(summary.folders, "folder")
+        else -> "${count(summary.files, "file")} in ${count(summary.folders, "folder")}"
+    }
+}

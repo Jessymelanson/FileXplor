@@ -3,6 +3,7 @@ package com.filexplor.app.ui.components
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -15,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.filexplor.app.data.Progress
+import com.filexplor.app.ui.progressLine
 
 /**
  * What a running copy, move, delete or download looks like.
@@ -40,7 +42,15 @@ fun JobBar(
     onCancel: () -> Unit
 ) {
     Surface(tonalElevation = 4.dp) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        // Above the gesture handle. The activity hosts this in its own
+        // Scaffold's bottom slot, which pads nothing for the navigation bar,
+        // so the bottom line of progress used to sit underneath it.
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     title,
@@ -59,13 +69,25 @@ fun JobBar(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
                 )
             }
-            Text(
-                progress.currentName.ifBlank { "Working out what to move…" },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    progress.currentName.ifBlank { "Working out what to move…" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                progressLine(progress)?.let { line ->
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 12.dp)
+                    )
+                }
+            }
         }
     }
 }

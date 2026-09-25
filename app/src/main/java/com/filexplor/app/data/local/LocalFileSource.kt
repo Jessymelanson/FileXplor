@@ -2,6 +2,7 @@ package com.filexplor.app.data.local
 
 import android.content.Context
 import android.os.Environment
+import android.os.storage.StorageManager
 import com.filexplor.app.data.FileItem
 import com.filexplor.app.data.FileSource
 import com.filexplor.app.data.joinPath
@@ -54,17 +55,44 @@ class LocalFileSource(context: Context) : FileSource {
 
     override fun openRead(path: String): InputStream = FileInputStream(File(path))
 
+    /**
+     * Written under a hidden name, and given the real one only once complete.
+     *
+     * A large download used to be written straight to its final name, so for
+     * the minutes it took there was a file that looked finished and was not --
+     * and if the app was killed part way, it stayed that way, the right name at
+     * the wrong length, with nothing to say so. Now the only file under the
+     * real name is a whole one. A copy that fails removes its partial file
+     * here; one killed outright leaves a hidden `.filexplor-part` behind, not
+     * something that passes for the original.
+     */
     override fun write(path: String, source: InputStream, length: Long) {
         val file = File(path)
-        file.parentFile?.mkdirs()
-        // 64 KB rather than Kotlin's 8 KB default, matching what the three
-        // remote clients copy in. Eight kilobytes is four syscalls per block
-        // on modern storage and it shows on a folder of video.
-        //
-        // The stream is not closed here on purpose: FileOperations opened it
-        // and closes it, and a destination that closed the source as well is
-        // the double-close that used to break server-to-server copies.
-        FileOutputStream(file).use { out -> source.copyTo(out, COPY_BUFFER_BYTES) }
+        val parent = file.parentFile
+        parent?.mkdirs()
+        // Bounded, because a name can already be near the filesystem's limit
+        // and this one adds to it.
+        val partial = File(parent, ".${file.name.take(60)}.filexplor-part")
+        try {
+            // 64 KB rather than Kotlin's 8 KB default, matching what the three
+            // remote clients copy in. Eight kilobytes is four syscalls per
+            // block on modern storage and it shows on a folder of video.
+            //
+            // The stream is not closed here on purpose: FileOperations opened
+            // it and closes it, and a destination that closed the source as
+            // well is the double-close that used to break server-to-server
+            // copies.
+            FileOutputStream(partial).use { out ->
+                source.copyTo(out, COPY_BUFFER_BYTES)
+                // On the disk before the rename, or a power cut could leave
+                // the real name pointing at data that never landed.
+                out.fd.sync()
+            }
+            if (!partial.renameTo(file)) throw IOException("Couldn't save ${file.name}.")
+        } catch (e: Throwable) {
+            partial.delete()
+            throw e
+        }
     }
 
     /**
@@ -118,11 +146,47 @@ class LocalFileSource(context: Context) : FileSource {
     override fun rename(path: String, newName: String) {
         val file = File(path)
         val target = File(file.parentFile, newName)
-        if (target.exists()) throw IOException("${newName} already exists here.")
+        if (target.exists()) {
+            // Shared storage ignores case, so renaming notes.txt to Notes.txt
+            // finds the file itself under the new name and was refused as a
+            // clash. It is one only when a different entry is listed under
+            // exactly that name, which is what a case-sensitive card shows.
+            val caseOnly = newName.equals(file.name, ignoreCase = true) &&
+                file.parentFile?.list()?.none { it == newName } == true
+            if (!caseOnly) throw IOException("${newName} already exists here.")
+
+            // Through a temporary name. A direct rename to a name that resolves
+            // to the same entry reports success and changes nothing.
+            val step = File(file.parentFile, ".${file.name}.${System.nanoTime()}.renaming")
+            if (!file.renameTo(step)) throw IOException("Couldn't rename ${file.name}.")
+            if (!step.renameTo(target)) {
+                step.renameTo(file)
+                throw IOException("Couldn't rename ${file.name}.")
+            }
+            return
+        }
         if (!file.renameTo(target)) throw IOException("Couldn't rename ${file.name}.")
     }
 
     override fun exists(path: String): Boolean = File(path).exists()
+
+    /**
+     * The most that could be made to fit, not the least.
+     *
+     * `usableSpace` leaves out cached data Android will clear when something
+     * needs the room, and refusing a copy the phone could have made room for is
+     * worse than letting one fail at the end: this is only the early warning.
+     * Zero means "unknown" to java.io.File as often as it means "full".
+     */
+    override fun freeSpace(path: String): Long? {
+        val dir = File(path)
+        val storage = app.getSystemService(StorageManager::class.java)
+        val allocatable = runCatching {
+            storage?.getAllocatableBytes(storage.getUuidForPath(dir))
+        }.getOrNull()
+        val usable = dir.usableSpace.takeIf { it > 0L }
+        return listOfNotNull(allocatable, usable).maxOrNull()
+    }
 
     /**
      * The places worth offering as a starting point.

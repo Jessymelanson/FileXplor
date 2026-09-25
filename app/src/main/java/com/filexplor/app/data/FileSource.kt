@@ -79,6 +79,13 @@ interface FileSource {
      */
     fun isTransient(error: Throwable): Boolean = false
 
+    /**
+     * Bytes that can still be written under [path], or null where the source
+     * cannot say. None of the three protocols reports free space in a way
+     * worth trusting, so only the phone answers.
+     */
+    fun freeSpace(path: String): Long? = null
+
     fun makeDirectory(path: String)
 
     /**
@@ -177,14 +184,22 @@ fun parentPath(path: String): String {
  * Pasting a file into the folder it came from is a normal thing to do and must
  * not mean silently destroying the original. The suffix goes before the
  * extension so the copy still opens in the same app.
+ *
+ * Taken is decided ignoring case. The phone's shared storage does not tell
+ * `notes.txt` from `Notes.txt`, and neither does an SMB share or an FTP server
+ * on Windows, so a name that differs only in case is the same file there:
+ * pasting `notes.txt` into a folder holding `Notes.txt` wrote straight over it
+ * and reported "1 item copied". On storage that does tell them apart the cost
+ * is a " (2)" that was not strictly needed, which is the right way round.
  */
 fun uniqueName(desired: String, existing: Set<String>): String {
-    if (desired !in existing) return desired
+    val taken = existing.mapTo(HashSet()) { it.lowercase() }
+    if (desired.lowercase() !in taken) return desired
     val dot = desired.lastIndexOf('.')
     val stem = if (dot > 0) desired.substring(0, dot) else desired
     val suffix = if (dot > 0) desired.substring(dot) else ""
     var n = 2
-    while ("$stem ($n)$suffix" in existing) n++
+    while ("$stem ($n)$suffix".lowercase() in taken) n++
     return "$stem ($n)$suffix"
 }
 

@@ -1,9 +1,11 @@
 package com.filexplor.app.data
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import java.io.InputStream
+import java.io.InterruptedIOException
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -44,6 +46,15 @@ data class Progress(
         val Preparing = Progress(0, 0, 0L, 0L, "")
     }
 }
+
+/**
+ * A transfer that stopped before the whole file arrived.
+ *
+ * An EOFException, so every retry decision in the app already reads it as a
+ * dropped connection -- which is what it nearly always is -- and tries again
+ * from the start rather than reporting a failure on the first go.
+ */
+class IncompleteTransferException(message: String) : java.io.EOFException(message)
 
 /** What happened, once an operation stopped. */
 data class OperationResult(
@@ -150,6 +161,13 @@ class FileOperations {
         var done = 0
         var bytes = 0L
 
+        // Checked from inside the byte loop. Stop cancels this coroutine, but
+        // the copy itself is a blocking read-write loop in whichever source
+        // does the writing, and nothing in there asks the coroutine anything:
+        // tapping Stop on one large file did nothing until the whole file had
+        // arrived, and then kept it.
+        val job = coroutineContext[Job]
+
         plan.directories.forEach { relative ->
             coroutineContext.ensureActive()
             val folder = joinPath(destination, relative)
@@ -199,6 +217,10 @@ class FileOperations {
                 outcome = runCatching {
                     from.openRead(planned.item.path).use { stream ->
                         val counting = CountingStream(stream) { read ->
+                            // An IOException rather than a cancellation, so
+                            // every protocol library below unwinds the way it
+                            // does for a dead socket, closing what it opened.
+                            if (job?.isActive == false) throw InterruptedIOException("Stopped.")
                             bytes += read
                             val now = System.currentTimeMillis()
                             if (now - reportedAt >= PROGRESS_INTERVAL_MS) {
@@ -216,6 +238,7 @@ class FileOperations {
                         }
                         to.write(target, counting, planned.item.size)
                     }
+                    verifyArrived(from, planned.item, bytes - bytesBeforeFile)
                 }
                 if (outcome.isSuccess) break
 
@@ -239,6 +262,10 @@ class FileOperations {
                 // swallowing that turned "stopped" into a list of per-file
                 // errors about files nobody was going to miss.
                 if (error is CancellationException) throw error
+                // A Stop from inside the byte loop arrives as the IOException
+                // thrown there, which also looks like a dead connection. It is
+                // not one to retry.
+                coroutineContext.ensureActive()
 
                 // Worth another go only where the failure was the connection
                 // rather than the file. A wifi handover, a server that drops an
@@ -287,6 +314,33 @@ class FileOperations {
         }
 
         return OperationResult(done, failures, cancelled = false)
+    }
+
+    /**
+     * Fails a file that arrived shorter than the listing said it was.
+     *
+     * The stream ending is not proof the file did. An FTP server that drops
+     * the data connection part way says so only on the control connection
+     * afterwards, and a proxy or a crashing server may not say so at all --
+     * either way the reader just sees the end of the stream. A 200 MB file
+     * that stopped at 50 MB was reported as "1 item moved", and the move then
+     * deleted the server's only whole copy.
+     *
+     * Short is not always wrong, though: the file may have been rewritten
+     * since the folder was listed. So a shortfall is checked against the
+     * source's size now, and only a file that is still bigger than what came
+     * across is treated as incomplete. More than expected passes -- a file
+     * that grew, like a log being written, arrived as it was when it was read.
+     */
+    private fun verifyArrived(from: FileSource, item: FileItem, arrived: Long) {
+        val expected = item.size
+        if (expected < 0L || arrived >= expected) return
+        val now = runCatching { from.stat(item.path)?.size }.getOrNull()
+        if (now != null && now == arrived) return
+        val percent = (arrived * 100 / expected).coerceIn(0L, 99L)
+        throw IncompleteTransferException(
+            "Only part of ${item.name} arrived ($percent%)."
+        )
     }
 
     /**

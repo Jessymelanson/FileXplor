@@ -55,9 +55,9 @@ later is the same steps, and installing over the top keeps your data.
 
 ## Verify what you downloaded
 
-| File | SHA-256 |
-|---|---|
-| `FileXplor-release.apk` | `3600bfe760c170f3fa8567355e484810904f533b614cceadb7e129ee5b39b78d` |
+| File | Version | SHA-256 |
+|---|---|---|
+| `FileXplor-release.apk` | 1.0.1 | `5cbd5d02f368616afa18a0ef08a806825842ed301dd56b8360ae3d3a6f68ebb1` |
 
 ```bash
 sha256sum FileXplor-release.apk                    # Linux, macOS, git bash

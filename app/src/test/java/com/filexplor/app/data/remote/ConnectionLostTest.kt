@@ -66,6 +66,14 @@ class ConnectionLostTest {
     }
 
     @Test
+    fun `an FTP session the client dropped itself is reconnected`() {
+        // What FtpRemoteClient.ensureOpen throws. commons-net's own answer on
+        // a dropped session was a NullPointerException, which is not this.
+        assertTrue(lost(org.apache.commons.net.ftp.FTPConnectionClosedException("Connection closed.")))
+        assertFalse(lost(NullPointerException("Socket.getInetAddress() on a null object reference")))
+    }
+
+    @Test
     fun `a cycle in the cause chain does not hang`() {
         val first = IOException("first")
         val second = IOException("second", first)

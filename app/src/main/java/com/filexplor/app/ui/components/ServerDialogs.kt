@@ -90,9 +90,9 @@ fun ServerSetupDialog(
                 if (protocol == RemoteProtocol.FTP) {
                     // Worth saying outright: someone choosing FTP from a list of
                     // three has no particular reason to know it sends the
-                    // password and every photo in the clear.
+                    // password and every file in the clear.
                     Text(
-                        "FTP sends your password and your photos unencrypted. Prefer SFTP " +
+                        "FTP sends your password and your files unencrypted. Prefer SFTP " +
                             "if the server offers it.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error

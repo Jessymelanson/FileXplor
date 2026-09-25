@@ -214,7 +214,10 @@ class SmbRemoteClient(server: RemoteServer) : RemoteClient {
             SMB2CreateDisposition.FILE_OPEN,
             null
         )
-        file.use { it.rename(smbPath(toPath), true) }
+        // Never replacing. With true here, renaming onto a name already in use
+        // deleted the file that had it, with no error; the browser now checks
+        // first, and this makes the server refuse as well.
+        file.use { it.rename(smbPath(toPath), false) }
     }
 
     override fun makeDirectory(path: String) {

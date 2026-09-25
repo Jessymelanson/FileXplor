@@ -2,6 +2,7 @@ package com.filexplor.app.data.remote
 
 import org.apache.commons.net.ftp.FTP
 import org.apache.commons.net.ftp.FTPClient
+import org.apache.commons.net.ftp.FTPConnectionClosedException
 import org.apache.commons.net.ftp.FTPReply
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -102,8 +103,9 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
         bufferSize = TRANSFER_BUFFER_BYTES
     }
 
-    override fun list(path: String): List<RemoteEntry> =
-        ftp.listFiles(path).orEmpty()
+    override fun list(path: String): List<RemoteEntry> {
+        ensureOpen()
+        return ftp.listFiles(path).orEmpty()
             // commons-net puts a null in the array for any LIST line its parser
             // could not make sense of — an unusual date format, a permission
             // string it doesn't know, a filename with a newline in it. Mapping
@@ -111,6 +113,11 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
             // as an empty folder, so one odd line silently hides the entire
             // directory. Dropping the unparseable entries loses only those.
             .filterNotNull()
+            // Some servers list the directory itself and its parent. Kept, "."
+            // is a folder inside every folder, and walking a tree to copy or
+            // delete it never reaches the bottom. SMB is filtered the same way;
+            // SFTP's library drops them itself.
+            .filter { it.name != "." && it.name != ".." }
             .map { file ->
                 RemoteEntry(
                     name = file.name,
@@ -119,43 +126,82 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
                     size = file.size
                 )
             }
+    }
+
+    /**
+     * Refuses to go on once the session has been dropped, in words the reconnect
+     * logic recognises.
+     *
+     * This client drops its own connection on purpose -- after a transfer the
+     * server refused, after a reader that stopped early, after an upload that
+     * failed part way -- so that the next call reconnects. But commons-net does
+     * not say "not connected" when asked to open a data connection on a dropped
+     * session; it dereferences the socket it no longer has. That surfaced as a
+     * NullPointerException about `Socket.getInetAddress()`, which nothing reads
+     * as a dead connection: the retry after a dropped download failed with it,
+     * and so did the next folder opened after a capped preview.
+     */
+    private fun ensureOpen() {
+        if (!ftp.isConnected) throw FTPConnectionClosedException("Connection closed.")
+    }
 
     override fun read(path: String): ByteArray {
+        ensureOpen()
         val stream = ftp.retrieveFileStream(path)
             ?: throw RemoteException("Couldn't read $path.")
-        try {
-            return stream.use { it.readBytes() }
-        } finally {
+        val bytes = try {
+            stream.use { it.readBytes() }
+        } catch (e: Throwable) {
             // Every retrieveFileStream has to be closed out with
             // completePendingCommand or the control connection desynchronises
-            // and every later call reads the wrong reply. In a `finally`
-            // because the read is exactly what can throw -- a dropped socket
+            // and every later call reads the wrong reply. A dropped socket
             // part way through a file used to skip this entirely and poison
             // the session for good, so one failed read turned into a server
             // that appeared to have nothing in it.
             settle()
+            throw e
         }
+        // Read to the end, so a refusal here is the server saying the file
+        // did not all arrive -- see openRead.
+        settle()?.let { refusal -> throw incomplete(path, refusal) }
+        return bytes
     }
 
     /**
      * Ends the transfer the control connection is waiting on.
      *
-     * False means the exchange did not finish the way commons-net expected. It
-     * is not always a fault: a reader that stopped early -- a preview capped at
-     * a few megabytes, a cancelled download -- leaves the server sending, and
-     * the 426 it answers with lands here. Either way this client's control
-     * connection is now out of step with the server, and the honest repair is
-     * to drop it. RemoteFileSource sees a dead socket on the next call and
-     * reconnects, which costs one round trip and is the only outcome that is
-     * correct in both cases.
+     * Null when the server confirmed it. Otherwise what the server said
+     * instead, and this client's control connection is now out of step with
+     * it, so it is dropped: RemoteFileSource sees a dead socket on the next
+     * call and reconnects, which costs one round trip.
      *
-     * Not thrown from. This runs on the way out of a read, often from a
-     * `finally`, and throwing here would replace whatever really happened.
+     * A refusal is not always a fault. A reader that stopped early -- a preview
+     * capped at a few megabytes, a cancelled download -- leaves the server
+     * sending, and the 426 it answers with lands here too. The callers know
+     * which case they are in; this only reports.
+     *
+     * A control connection that died before answering is not a refusal, and
+     * comes back null. The data may well all have arrived; the byte count the
+     * copy keeps is what decides that, not a reply that never came.
+     *
+     * Not thrown from. This runs on the way out of a read, and throwing here
+     * would replace whatever really happened.
      */
-    private fun settle() {
-        val settled = runCatching { ftp.completePendingCommand() }.getOrDefault(false)
-        if (!settled) runCatching { ftp.disconnect() }
+    private fun settle(): String? {
+        val settled = runCatching { ftp.completePendingCommand() }
+        if (settled.getOrDefault(false)) return null
+        val refusal = if (settled.isSuccess) {
+            ftp.replyString?.trim()?.takeIf { it.isNotBlank() } ?: "no reason given"
+        } else {
+            null
+        }
+        runCatching { ftp.disconnect() }
+        return refusal
     }
+
+    private fun incomplete(path: String, refusal: String) = com.filexplor.app.data.IncompleteTransferException(
+        "${path.substringAfterLast('/')} did not arrive whole. The server said: $refusal"
+    )
 
     /**
      * The remote file as a stream, finishing the FTP transaction on close.
@@ -166,9 +212,23 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
      * wrong reply. So close has to do both, and in that order.
      */
     override fun openRead(path: String): InputStream {
+        ensureOpen()
         val stream = ftp.retrieveFileStream(path)
             ?: throw RemoteException("Couldn't read $path.")
         return object : FilterInputStream(stream) {
+
+            /**
+             * Whether the reader got to the end of the data, as against
+             * stopping early and closing. Only a reader that got to the end is
+             * told the server's refusal: for one that stopped, the refusal is
+             * the server's answer to being stopped.
+             */
+            private var ended = false
+
+            override fun read(): Int = super.read().also { if (it < 0) ended = true }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int =
+                super.read(b, off, len).also { if (it < 0) ended = true }
 
             /**
              * Closed once, however many times it is asked.
@@ -184,22 +244,48 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
              */
             private var closed = false
 
+            /**
+             * And the server's verdict, which is the only place a dropped
+             * transfer shows. A server that gives up part way closes the data
+             * connection -- to the reader, the file simply ends -- and says 426
+             * on the control connection afterwards. That reply used to be
+             * swallowed here, so a 200 MB file that stopped at 50 MB was
+             * reported as copied, and as moved: the original was then deleted.
+             */
             override fun close() {
                 if (closed) return
                 closed = true
-                try { super.close() } finally { settle() }
+                val closing = runCatching { super.close() }
+                val refusal = settle()
+                closing.exceptionOrNull()?.let { throw it }
+                if (ended && refusal != null) throw incomplete(path, refusal)
             }
         }
     }
 
     override fun write(path: String, bytes: ByteArray) {
+        ensureOpen()
         val ok = ByteArrayInputStream(bytes).use { ftp.storeFile(path, it) }
         if (!ok) throw RemoteException("Couldn't write $path. The server rejected it.")
     }
 
-    /** FTP takes a stream natively, so nothing is buffered here at all. */
+    /**
+     * FTP takes a stream natively, so nothing is buffered here at all.
+     *
+     * An upload that throws part way -- the source failing, or Stop -- leaves
+     * the server's reply to it unread on the control connection. The next
+     * command would then read that reply as its own, and so would every one
+     * after it. So the connection is dropped instead, and the next call
+     * reconnects.
+     */
     override fun write(path: String, source: InputStream, length: Long) {
-        val ok = source.use { ftp.storeFile(path, it) }
+        ensureOpen()
+        val ok = try {
+            source.use { ftp.storeFile(path, it) }
+        } catch (e: Throwable) {
+            runCatching { ftp.disconnect() }
+            throw e
+        }
         if (!ok) {
             val reply = ftp.replyString?.trim()?.takeIf { it.isNotBlank() }
             throw RemoteException(
@@ -221,6 +307,7 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
      * announced as removed while they were still sitting there.
      */
     override fun delete(path: String, isDirectory: Boolean) {
+        ensureOpen()
         val ok = if (isDirectory) ftp.removeDirectory(path) else ftp.deleteFile(path)
         if (ok) return
         val reply = ftp.replyString?.trim()?.takeIf { it.isNotBlank() }
@@ -254,23 +341,37 @@ class FtpRemoteClient(server: RemoteServer) : RemoteClient {
 
     /** Whether a plain file sits at [path], asked by listing its parent — the
      *  one query every server answers the same way. `LIST` aimed straight at a
-     *  file is widely but not universally supported. */
+     *  file is widely but not universally supported.
+     *
+     *  Matched ignoring case. A Windows server (IIS) treats `notes.txt` and
+     *  `Notes.txt` as one file, so an exact match said "not there", and
+     *  creating the second name stored an empty file over the first. The only
+     *  callers ask before creating something, where a false "already here" on
+     *  a case-sensitive server costs a different name and a false "not there"
+     *  costs the file. */
     private fun fileExists(path: String): Boolean = try {
         val name = path.trimEnd('/').substringAfterLast('/')
-        ftp.listFiles(path.parentPath()).orEmpty().any { it.name == name && !it.isDirectory }
+        ftp.listFiles(path.parentPath()).orEmpty()
+            .any { it.name.equals(name, ignoreCase = true) && !it.isDirectory }
     } catch (e: Exception) {
         false
     }
 
-    override fun exists(path: String): Boolean = directoryExists(path) || fileExists(path)
+    override fun exists(path: String): Boolean {
+        // Checked here because the two below swallow every failure as "no".
+        ensureOpen()
+        return directoryExists(path) || fileExists(path)
+    }
 
     override fun rename(fromPath: String, toPath: String) {
+        ensureOpen()
         if (!ftp.rename(fromPath, toPath)) {
             throw RemoteException("Couldn't rename to ${toPath.substringAfterLast('/')}.")
         }
     }
 
     override fun makeDirectory(path: String) {
+        ensureOpen()
         // A server that already has the folder answers 550, which is not an
         // error from the caller's point of view — hence the directory check
         // rather than trusting the return code.

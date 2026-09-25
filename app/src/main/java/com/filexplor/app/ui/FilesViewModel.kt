@@ -874,6 +874,24 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val renamed = renameCollisions(plan, existing.getOrDefault(emptySet()))
 
+                // Refused before it starts when it cannot fit. Left to find
+                // out for itself, a copy of a large film filled the phone for
+                // several minutes, failed at the last few hundred megabytes and
+                // deleted what it had written -- the whole wait for nothing,
+                // and a phone briefly at 0 bytes free, which other apps
+                // handle badly. The clipboard is kept for after a tidy-up.
+                val free = withContext(Dispatchers.IO) {
+                    runCatching { destination.freeSpace(destinationPath) }.getOrNull()
+                }
+                if (free != null && plan.totalBytes > free) {
+                    _state.value = _state.value.copy(
+                        job = null,
+                        notice = "Not enough space. This needs ${formatBytes(plan.totalBytes)} " +
+                            "and ${formatBytes(free)} is free here."
+                    )
+                    return@launch
+                }
+
                 val result = withContext(Dispatchers.IO) {
                     app.operations.copy(from, destination, destinationPath, renamed) { progress ->
                         _state.value = _state.value.copy(job = RunningJob(title, progress))
@@ -1280,7 +1298,21 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(dialog = null)
         viewModelScope.launch {
             val renamed = withContext(Dispatchers.IO) {
-                runCatching { current.rename(item.path, cleaned) }
+                runCatching {
+                    // Asked here, of a fresh listing, because the servers do
+                    // not ask at all. SMB renames with replace-if-exists and
+                    // most FTP servers overwrite on RNTO, so renaming a.txt to
+                    // the name of a file already there deleted that file
+                    // without a word. Compared ignoring case for the same
+                    // reason pasting is (see uniqueName); the file being
+                    // renamed does not clash with itself, which is what lets
+                    // notes.txt become Notes.txt.
+                    val here = current.list(parentPath(item.path)).map { it.name }
+                    if (here.any { it != item.name && it.equals(cleaned, ignoreCase = true) }) {
+                        throw java.io.IOException("$cleaned already exists here.")
+                    }
+                    current.rename(item.path, cleaned)
+                }
             }
             renamed.onFailure {
                 _state.value = _state.value.copy(notice = it.message ?: "Couldn't rename that.")
@@ -1387,6 +1419,15 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val file = DownloadCache.prepare(app, _state.value.location, item)
 
+                    // As for a paste: said before the wait, not after it.
+                    val free = file.parentFile?.let { app.local.freeSpace(it.path) }
+                    if (free != null && item.size > free) {
+                        throw java.io.IOException(
+                            "Not enough space to open ${item.name}. It needs " +
+                                "${formatBytes(item.size)} and ${formatBytes(free)} is free."
+                        )
+                    }
+
                     // The same second chance a copy gets. A download is a
                     // transfer like any other, and losing a 40 MB APK at 90%
                     // to a wifi handover -- then being told only that it could
@@ -1486,6 +1527,14 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+        }
+        // Short means the connection ended, not the file. Opening it anyway
+        // hands a viewer a truncated video or a corrupt archive; thrown
+        // instead, the retry above fetches it again.
+        if (item.size >= 0L && copied < item.size) {
+            throw com.filexplor.app.data.IncompleteTransferException(
+                "Only part of ${item.name} arrived."
+            )
         }
     }
 
@@ -1637,11 +1686,66 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showDialog(dialog: Dialog) {
+        if (dialog !is Dialog.Details) stopCounting()
         _state.value = _state.value.copy(dialog = dialog)
     }
 
     fun dismissDialog() {
+        stopCounting()
         _state.value = _state.value.copy(dialog = null)
+    }
+
+    /** The folder count behind an open Details panel, if one is running. */
+    private var countingJob: Job? = null
+
+    /**
+     * The details panel, with a folder's contents counted while it is open.
+     *
+     * A folder's panel used to say only that it was a folder and when it was
+     * last changed -- nothing about how much was in it, which is the question
+     * someone opening it usually has before copying, moving or deleting it.
+     *
+     * Counted on a connection of its own for a server, like the far end of a
+     * paste: the one the browser holds is not safe to share between two
+     * threads, and a count can outlast the panel by one listing. Stopped when
+     * the panel closes.
+     */
+    fun showDetails(item: FileItem) {
+        stopCounting()
+        _state.value = _state.value.copy(dialog = Dialog.Details(item))
+        if (!item.isDirectory) return
+
+        val location = _state.value.location
+        countingJob = viewModelScope.launch {
+            val counter = withContext(Dispatchers.IO) { runCatching { sourceFor(location) } }
+                .getOrNull() ?: return@launch
+            try {
+                val total = withContext(Dispatchers.IO) {
+                    com.filexplor.app.data.summariseFolder(counter, item.path) { running ->
+                        showSummary(item, running)
+                    }
+                }
+                showSummary(item, total)
+            } finally {
+                if (counter !== app.local) {
+                    withContext(Dispatchers.IO) { runCatching { counter.close() } }
+                }
+            }
+        }
+    }
+
+    /** Updates the panel, if it is still the one for [item]. */
+    private fun showSummary(item: FileItem, summary: com.filexplor.app.data.FolderSummary) {
+        _state.update { current ->
+            val open = current.dialog as? Dialog.Details ?: return@update current
+            if (open.item.path != item.path) return@update current
+            current.copy(dialog = open.copy(summary = summary))
+        }
+    }
+
+    private fun stopCounting() {
+        countingJob?.cancel()
+        countingJob = null
     }
 
     fun clearNotice() {
@@ -1788,11 +1892,24 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
             //
             // Setting only `original`, to the text that actually went out,
             // leaves anything typed since in place and correctly still dirty.
+            //
+            // The listing behind the editor is corrected in the same step. It
+            // was listed before the save and nothing re-lists it on the way
+            // back, so the folder went on showing the old size -- a file saved
+            // at 28 bytes still read 15 -- until the user thought to pull it.
             written.onSuccess {
+                val savedAt = System.currentTimeMillis()
                 _state.update { current ->
                     val live = current.editor ?: return@update current
                     current.copy(
                         editor = live.copy(original = saved, saving = false),
+                        entries = current.entries.map { entry ->
+                            if (entry.path == live.item.path) {
+                                entry.copy(size = bytes.size.toLong(), lastModified = savedAt)
+                            } else {
+                                entry
+                            }
+                        },
                         notice = "Saved ${live.item.name}."
                     )
                 }
